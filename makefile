@@ -1,2 +1,2 @@
-main: main.cpp slog.cpp slog.h
-	g++ -o main slog.cpp main.cpp -std=c++17 -lfmt -g -O3
+main: main.cpp slog.h
+	g++ -o main main.cpp -std=c++17 -lfmt -g -O3 -lpthread
