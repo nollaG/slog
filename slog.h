@@ -19,15 +19,17 @@
 #include <sys/syscall.h>
 
 
-namespace strade {
+namespace slog {
 
 constexpr size_t LogMsgBufferSize = 64;
 constexpr size_t LogMsgQueueSize  = 102400;
 
-inline uint64_t rdtsc() {
-  unsigned int lo, hi;
-  __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
-  return ((uint64_t)hi<<32) | lo;
+namespace {
+  inline uint64_t rdtsc() {
+    unsigned int lo, hi;
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+    return ((uint64_t)hi<<32) | lo;
+  }
 }
 
 [[gnu::cold,gnu::noinline,gnu::weak]] int gettid() {
@@ -57,122 +59,14 @@ template <size_t... pcs>
       return reinterpret_cast<const char*>(smsg);
     }
   };
-#define SLOG_PRIV_HPPF_TSTR32(i,s)   ::strade::at8(i+(8*0),s),::strade::at8(i+(8*1),s),::strade::at8(i+(8*2),s),::strade::at8(i+(8*3),s)
+#define SLOG_PRIV_HPPF_TSTR32(i,s)   ::slog::at8(i+(8*0),s),::slog::at8(i+(8*1),s),::slog::at8(i+(8*2),s),::slog::at8(i+(8*3),s)
 #define SLOG_PRIV_HPPF_TSTR128(i,s)  SLOG_PRIV_HPPF_TSTR32(i+(32*0),s),SLOG_PRIV_HPPF_TSTR32(i+(32*1),s),SLOG_PRIV_HPPF_TSTR32(i+(32*2),s),SLOG_PRIV_HPPF_TSTR32(i+(32*3),s)
 #define SLOG_PRIV_HPPF_TSTR512(i,s)  SLOG_PRIV_HPPF_TSTR128(i+(128*0),s),SLOG_PRIV_HPPF_TSTR128(i+(128*1),s),SLOG_PRIV_HPPF_TSTR128(i+(128*2),s),SLOG_PRIV_HPPF_TSTR128(i+(128*3),s)
 #define SLOG_PRIV_HPPF_TSTR1024(i,s) SLOG_PRIV_HPPF_TSTR512(i+(512*0),s),SLOG_PRIV_HPPF_TSTR512(i+(512*1),s)
-#define SLOG_PRIV_HPPF_TSTR(s)       ::strade::strpack<SLOG_PRIV_HPPF_TSTR1024(0,s)>
+#define SLOG_PRIV_HPPF_TSTR(s)       ::slog::strpack<SLOG_PRIV_HPPF_TSTR1024(0,s)>
 
-template <typename T>
-struct ArgPacker;
-
-template <typename T>
-struct PrimPacker {
-  using OutT = T;
-  constexpr static size_t size(const T&) { return sizeof(T); }
-  static void write(char*& buffer, T x)  { *(T*)buffer = x; buffer += sizeof(T); }
-  static OutT read(char*& buffer)        { T x = *(T*)buffer; buffer += sizeof(T); return x; }
-};
-
-
-template <typename ... Ts>
-struct ArgsPacker;
-
-#define DEFINE_PRIM_PACKER(T) template<> struct ArgPacker<T> : public PrimPacker<T> {};
-
-DEFINE_PRIM_PACKER(bool);
-DEFINE_PRIM_PACKER(char);
-DEFINE_PRIM_PACKER(double);
-DEFINE_PRIM_PACKER(float);
-DEFINE_PRIM_PACKER(int8_t);
-DEFINE_PRIM_PACKER(int16_t);
-DEFINE_PRIM_PACKER(int32_t);
-DEFINE_PRIM_PACKER(int64_t);
-DEFINE_PRIM_PACKER(uint8_t);
-DEFINE_PRIM_PACKER(uint16_t);
-DEFINE_PRIM_PACKER(uint32_t);
-DEFINE_PRIM_PACKER(uint64_t);
-DEFINE_PRIM_PACKER(std::string_view);
-
-template <>
-struct ArgPacker<std::string> {
-  using OutT = std::string;
-  static size_t size(const std::string& x) {
-    return ArgPacker<size_t>::size(1) + x.size();
-  }
-  static void write(char*& buffer, const std::string& x) {
-    ArgPacker<size_t>::write(buffer, x.size());
-    memcpy(buffer, x.data(), x.size());
-    buffer += x.size();
-  }
-  static std::string read(char*& buffer) {
-    size_t size = ArgPacker<size_t>::read(buffer);
-    std::string x(buffer, size);
-    buffer += size;
-    return x;
-  }
-};
-
-template <>
-struct ArgsPacker<> {
-  constexpr static size_t size(){ return 0; }
-  static void  write(char*& buffer) {}
-};
-
-template <typename T, typename ... Ts>
-struct ArgsPacker<T, Ts...> {
-  constexpr static size_t size(T&& arg, Ts&& ... args) { return ArgPacker<std::decay_t<T>>::size(std::forward<T>(arg)) + ArgsPacker<Ts...>::size(std::forward<Ts>(args)...); }
-  static void write(char*& buffer, T&& arg, Ts&& ... args) { ArgPacker<std::decay_t<T>>::write(buffer, std::forward<T>(arg)); ArgsPacker<Ts...>::write(buffer, std::forward<Ts>(args)...); }
-};
-
-template <typename Result, int I, typename ... Ts>
-struct ArgsDecoderImpl;
-
-template <typename Result, int I, typename T, typename ... Ts>
-struct ArgsDecoderImpl<Result, I, T, Ts...> {
-  [[gnu::cold]] static void prepare(Result& result, char*& buffer) {
-    std::get<I>(result) = ArgPacker<std::decay_t<T>>::read(buffer);
-    ArgsDecoderImpl<Result, I+1, Ts...>::prepare(result, buffer);
-  }
-};
-
-template <typename Result, int I>
-struct ArgsDecoderImpl<Result, I> {
-  static void prepare(Result& result, char*& buffer) {}
-};
-
-template <typename ... Ts>
-struct ArgsDecoder {
-  using Result = std::tuple<typename ArgPacker<Ts>::OutT...>;
-  static std::tuple<Ts...> prepare(char*& buffer) {
-    Result result;
-    ArgsDecoderImpl<Result, 0, Ts...>::prepare(result, buffer);
-    return result;
-  }
-};
-
-
-template <typename ... Ts>
-[[gnu::cold]] std::string formatLogMsg(const std::string& fmt, char* buffer) {
-  const auto& params = ArgsDecoder<Ts...>::prepare(buffer);
-  return std::apply([=](const auto&... args)->std::string {
-      return fmt::format(fmt, args...); }, params);
-}
-
-template <typename ... Args>
-[[gnu::hot]] void writeArgs(char* buffer, Args&& ... args) {
-  if ((ArgPacker<std::decay_t<Args>>::size(args) + ...) > LogMsgBufferSize) {
-    throw std::runtime_error("exceeded maximum log buffer size.");
-  }
-  ArgsPacker<Args...>::write(buffer, std::forward<Args>(args)...);
-}
-
-template <>
-constexpr void writeArgs(char* buffer) { }
 
 struct LogMsg {
-  uint32_t id;
-  uint64_t timestamp;
   char     buffer[LogMsgBufferSize];
 };
 
@@ -193,55 +87,51 @@ enum LogLevel {
   }
 }
 
-struct StmtStore {
-  struct Stmt {
-    std::string filename;
-    uint32_t    lineno;
-    LogLevel    level;
-    std::function<std::string(char*)> formatter;
+struct LogClosure {
+  virtual ~LogClosure() {}
 
-    std::string apply(LogMsg* msg, int tid) {
-      static int pid = getpid();
-      auto epoch = std::chrono::nanoseconds(msg->timestamp);
-      auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::time_point(epoch));
-      auto ns = msg->timestamp % 1000'000'000;
-      return fmt::format("{:<5} [{:%F %H:%M:%S}.{:0>9}] [{}:{}] {} ({}:{})", to_string(level), fmt::localtime(t), ns, pid, tid, formatter(msg->buffer), filename, lineno);
+  virtual std::string apply() const = 0;
+  virtual const std::string& filename() const = 0;
+  virtual LogLevel level() const = 0;
+  virtual uint32_t line( ) const = 0;
+  virtual uint64_t timestamp() const = 0;
+};
+
+template <LogLevel Level, typename File, uint32_t Line, typename FormatStr, typename ArgsTuple>
+struct LogClosureT;
+
+//LogClosure close over:
+//Compile time:
+//  level, filanem, lineno, format
+//Runtime:
+//  timestamp, args payload
+template <LogLevel Level, typename File, uint32_t Line, typename FormatStr, typename ... Args>
+class LogClosureT<Level, File, Line, FormatStr, std::tuple<Args...>> : public LogClosure {
+  public:
+    [[gnu::hot]] inline LogClosureT(uint64_t ts, Args&& ... args)
+      : _ts(ts), _data(std::forward<Args>(args)...)
+    {
     }
-  };
 
-  template <typename ... Args>
-  uint32_t addStmt(LogLevel level, const std::string& filename, uint32_t lineno, const std::string& fmt) {
-    Stmt s {
-      .filename = filename.substr(filename.find_last_of("/\\") + 1),
-      .lineno   = lineno,
-      .level    = level,
-      .formatter = [fmt](char* buffer) {
-        return formatLogMsg<Args...>(fmt, buffer);
-      }
-    };
-    _stmts.push_back(s);
-    return _stmts.size() - 1;
-  }
+    std::string apply() const final {
+      static std::string fmt = FormatStr::str();
+      return std::apply([=](const auto&... args)->std::string {
+          return fmt::format(fmt, args...); }, _data);
+    }
 
-  std::vector<Stmt> _stmts;
+    const std::string& filename() const final {
+      static std::string x = std::string(File::str()).substr(std::string(File::str()).find_last_of("/\\") + 1);
+      return x;
+    }
 
+    LogLevel level()     const final { return Level; }
+    uint32_t line( )     const final { return Line;  } 
+    uint64_t timestamp() const final { return _ts;  }
+
+  private:
+    uint64_t _ts;
+    std::tuple<std::decay_t<Args>...> _data;
 };
-
-inline StmtStore g_logStmtStore;
-
-template <typename ... Args>
-std::tuple<std::decay_t<Args>...> makeLogArgsTypes(Args&& ... args);
-
-template <LogLevel Level, typename File, uint32_t Line, typename FormatStr, typename ArgsType>
-struct LogStatement;
-
-template <LogLevel Level, typename File, uint32_t Line, typename FormatStr, typename ... Args>
-struct LogStatement<Level, File, Line, FormatStr, std::tuple<Args...>> {
-  static uint32_t id;
-};
-
-template <LogLevel Level, typename File, uint32_t Line, typename FormatStr, typename ... Args>
-uint32_t LogStatement<Level, File, Line, FormatStr, std::tuple<Args...>>::id = g_logStmtStore.addStmt<Args...>(Level, File::str(), Line, FormatStr::str());
 
 class LogQueue {
   public:
@@ -307,6 +197,26 @@ class Log {
       _stop = true;
     }
 
+    std::string format(LogClosure* closure, int tid) {
+      using namespace fmt::literals;
+      static int pid = getpid();
+      auto timestamp = _baseTime + (closure->timestamp() - _baseTick) * _nanos / _ticks;
+      auto epoch = std::chrono::nanoseconds(timestamp);
+      auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::time_point(epoch));
+      auto ns = timestamp % 1000'000'000;
+      auto tm = fmt::localtime(t);
+      return fmt::format("{level:<5} [{time:%F %H:%M:%S}.{nano:0>9}] [{pid}:{tid}] {text} ({file}:{line})",
+          "level"_a = to_string(closure->level()),
+          "time"_a  = tm,
+          "nano"_a  = ns,
+          "pid"_a   = pid,
+          "tid"_a   = tid,
+          "text"_a  = closure->apply(),
+          "file"_a  = closure->filename(),
+          "line"_a  = closure->line()
+      );
+    }
+
     [[gnu::cold, gnu::noinline]] void calibrate() {
       auto r1 = now();
       auto t1 = rdtsc();
@@ -324,8 +234,9 @@ class Log {
       std::lock_guard<std::mutex> guard(_lock);
       for (auto q : _qs) {
         while(auto msg = q->getRead()) {
-          msg->timestamp = _baseTime + (msg->timestamp - _baseTick)*_nanos/_ticks;
-          std::cout << g_logStmtStore._stmts[msg->id].apply(msg, q->tid()) << std::endl;
+          auto closure = (LogClosure*)msg->buffer;
+          std::cout << format(closure, q->tid()) << std::endl;
+          closure->~LogClosure();
           q->commitRead();
         }
       }
@@ -361,20 +272,20 @@ class Log {
 inline Log g_log;
 inline __thread  LogQueue* g_logQueue = nullptr;
 
-template <typename ... Args>
-[[gnu::hot]] inline void logImpl(uint32_t id, Args&& ... args) {
+template <LogLevel Level, typename File, uint32_t Line, typename FormatStr, typename ... Args>
+[[gnu::hot]] inline void logImpl(Args&& ... args) {
   LogMsg* msg = (LogMsg*)g_logQueue->getWrite();
-  msg->id = id;
-  msg->timestamp = rdtsc();
-  writeArgs(msg->buffer, std::forward<Args>(args)...);
+  using Closure = LogClosureT<Level, File, Line, FormatStr, std::tuple<Args...>>;
+  static_assert(sizeof(LogClosureT<Level, File, Line, FormatStr, std::tuple<Args...>>) <= LogMsgBufferSize, "Logging args is too large");
+  new (msg->buffer) Closure(rdtsc(), std::forward<Args>(args)...);
   g_logQueue->commitWrite();
 }
 
-#define LOG_IMPL(LEVEL, FMT, ARGS...) ::strade::logImpl(::strade::LogStatement<LEVEL, SLOG_PRIV_HPPF_TSTR(__FILE__),__LINE__,SLOG_PRIV_HPPF_TSTR(FMT),decltype(::strade::makeLogArgsTypes(ARGS))>::id, ##ARGS)
+#define LOG_IMPL(LEVEL, FMT, ARGS...) ::slog::logImpl<LEVEL, SLOG_PRIV_HPPF_TSTR(__FILE__),__LINE__,SLOG_PRIV_HPPF_TSTR(FMT)>(ARGS)
 
-#define LOG_INFO(FMT, ARGS...)  LOG_IMPL(::strade::LogLevel::INFO,  FMT, ##ARGS)
-#define LOG_DEBUG(FMT, ARGS...) LOG_IMPL(::strade::LogLevel::DEBUG, FMT, ##ARGS)
-#define LOG_ERROR(FMT, ARGS...) LOG_IMPL(::strade::LogLevel::ERROR, FMT, ##ARGS)
+#define LOG_INFO(FMT, ARGS...)  LOG_IMPL(::slog::LogLevel::INFO,  FMT, ##ARGS)
+#define LOG_DEBUG(FMT, ARGS...) LOG_IMPL(::slog::LogLevel::DEBUG, FMT, ##ARGS)
+#define LOG_ERROR(FMT, ARGS...) LOG_IMPL(::slog::LogLevel::ERROR, FMT, ##ARGS)
 
 [[gnu::cold, gnu::noinline, gnu::weak]] void initLogging() {
   g_logQueue = new LogQueue();
